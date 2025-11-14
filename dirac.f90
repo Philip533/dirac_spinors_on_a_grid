@@ -19,11 +19,14 @@ program dirac
     integer :: N ! num of points
     real(kind=dp) :: dx
     real(kind=dp) :: x_min ! max value in 1 dimension
-    real(kind=dp), dimension(:,:,:,:)
+    real(kind=dp), dimension(:), allocatable :: x, y, z, weight
   end type grid_type
 
   complex(dp), parameter :: cplx_zero = (0.0_dp, 0.0_dp)
-  real(dp), parameter :: pi = 3.14159265358979_dp
+  real(kind=dp), parameter :: particle_mass = 206.76_dp
+  integer,  parameter :: nuclear_Z = 2
+  ! real(kind=dp), parameter :: particle_mass = 1.0_dp
+  real(dp), parameter :: pi = 3.14159265358979_dp 
   real(kind=dp), parameter :: speed_of_light = 137.0_dp
   real(kind=dp), parameter :: fine_structure = 0.007297352_dp
   real(kind=dp), parameter :: amu = 1.66e-27_dp
@@ -90,8 +93,8 @@ program dirac
   procedure(radial_function), pointer :: radial 
 
   ! n, l, j, m, Z
-  call set_quantum_numbers(initial_state, 2, 1, 0.5_dp, 206.768_dp, 1)
-  call set_quantum_numbers(final_state, 1, 0, 0.5_dp, 206.768_dp, 1)
+  call set_quantum_numbers(initial_state, 2, 1, 1.5_dp, particle_mass, nuclear_Z)
+  call set_quantum_numbers(final_state, 1, 0, 0.5_dp, particle_mass, nuclear_Z)
 
   ! Initialise Pauli matrices in the vector
   pauli_vec(1,:,:) = reshape((/ 0.0_dp, 1.0_dp, 1.0_dp, 0.0_dp /), shape(pauli_vec(1,:,:)))
@@ -107,23 +110,16 @@ program dirac
   end do
 
   ! radial => gaussian_radial  
-  radial => constant_radial  
-  ! radial => hydrogenic_u_bispinor
+  ! radial => constant_radial  
+  radial => hydrogenic_u_bispinor
   ! call radial((/0.0_dp, 0.0_dp, 0.0_dp /),bispinor)
 
-  grid%N = 851
-  grid%x_min = 7.5_dp
-  grid%dx = grid%x_min * 2.0_dp / grid%N
-  dx = grid%dx
-  N = grid%N
-  x_min = grid%x_min
-
+  call read_in_grid("lebedev_he.dat", grid)
   
   initial_state%norms = check_spinor_normalisation(initial_state, grid)
   write(*,*) "Initial state norms for each m value = ", initial_state%norms
   final_state%norms = check_spinor_normalisation(final_state, grid)
   write(*,*) "Final state norms for each m value = ", final_state%norms
-  stop
 
   transition_energy =  -hydrogenic_dirac_energy(final_state)&
   & + hydrogenic_dirac_energy(initial_state)
@@ -137,28 +133,20 @@ program dirac
         cycle
       end if
       integrand = 0.0_dp
-      !$omp parallel do collapse(3) reduction(+:integrand) shared(dx,alpha_vec,x_min,initial_state,final_state,m1,m2, &
+      !$omp parallel do reduction(+:integrand) shared(alpha_vec,initial_state,final_state,m1,m2, &
       !$omp transition_energy, grid)&
       !$omp private(dirac_spinor1,dirac_spinor2, wvfn_product, r)  default(none) 
-      do i = 1, grid%N 
-        do j = 1, grid%N 
-          do k = 1, grid%N 
-            r = (/-x_min+real(i,dp)*dx,-x_min+real(k,dp)*dx  , -x_min+real(k,dp)*dx /)
-            call hydrogenic_dirac_spinor(r, initial_state, initial_state%m(m1), dirac_spinor1)
-            call hydrogenic_dirac_spinor(r, final_state, final_state%m(m2),  dirac_spinor2)
+      do i = 1, size(grid%x)
+        r = (/ grid%x(i), grid%y(i), grid%z(i) /)
+        call hydrogenic_dirac_spinor(r, initial_state, initial_state%m(m1), dirac_spinor1)
+        call hydrogenic_dirac_spinor(r, final_state, final_state%m(m2),  dirac_spinor2)
 
-            wvfn_product(1) = dot_product((dirac_spinor2), matmul(alpha_vec(1,:,:), dirac_spinor1)) !* dx**3 
-            wvfn_product(2) = dot_product((dirac_spinor2), matmul(alpha_vec(2,:,:), dirac_spinor1)) !* dx**3
-            wvfn_product(3) = dot_product((dirac_spinor2), matmul(alpha_vec(3,:,:), dirac_spinor1)) !* dx**3
-            ! wvfn_product(1) = dot_product((dirac_spinor2), dirac_spinor1) !* dx**3 
-            ! wvfn_product(2) = dot_product((dirac_spinor2),  dirac_spinor1) !* dx**3
-            ! wvfn_product(3) = dot_product((dirac_spinor2),  dirac_spinor1) !* dx**3
-            ! wvfn_product = wvfn_product*spherical_bessel_zero(transition_energy/speed_of_light, norm2(r)) * dx**3
-            wvfn_product = wvfn_product * dx**3
-            integrand = integrand + dot_product(wvfn_product, wvfn_product)
-            ! write(71,*) r(1), r(3), real(dot_product(wvfn_product, wvfn_product))
-          end do
-        end do
+        wvfn_product(1) = dot_product((dirac_spinor2), matmul(alpha_vec(1,:,:), dirac_spinor1)) 
+        wvfn_product(2) = dot_product((dirac_spinor2), matmul(alpha_vec(2,:,:), dirac_spinor1))
+        wvfn_product(3) = dot_product((dirac_spinor2), matmul(alpha_vec(3,:,:), dirac_spinor1))
+        wvfn_product = wvfn_product * grid%weight(i)
+        integrand = integrand + dot_product(wvfn_product, wvfn_product)
+        ! write(71,*) r(1), r(3), real(dot_product(wvfn_product, wvfn_product))
       end do
 
       write(*,'(A, F4.1, A, F4.1, ES15.5)') "Total rate for m1 =  ", initial_state%m(m1), " m2 = ",final_state%m(m2),  &
@@ -186,19 +174,16 @@ contains
     ! Lets check normalisation of our states
     norm = 0.0_dp
     do m1 = 1, size(state%m)
-      !$omp parallel do collapse(3) default(none) shared(state,m1,grid)&
+      !$omp parallel do default(none) shared(state,m1,grid)&
       !$omp private(spinor, r)  reduction(+:norm) 
-      do i = 1, grid%N
-        do j = 1, grid%N
-          do k = 1, grid%N
-            r = (/-grid%x_min+real(i,dp)*grid%dx, -grid%x_min+real(j,dp)*grid%dx,  -grid%x_min+real(k,dp)*grid%dx/)
-            ! r = (/-grid%x_min+real(i,dp)*grid%dx, 0.0_dp,  -grid%x_min+real(k,dp)*grid%dx/)
-            call hydrogenic_dirac_spinor(r, state, state%m(m1), spinor)
+      do i = 1, size(grid%x)
+        ! r = (/-grid%x_min+real(i,dp)*grid%dx, -grid%x_min+real(j,dp)*grid%dx,  -grid%x_min+real(k,dp)*grid%dx/)
+        r = (/ grid%x(i), grid%y(i), grid%z(i) /)
+        ! r = (/-grid%x_min+real(i,dp)*grid%dx, 0.0_dp,  -grid%x_min+real(k,dp)*grid%dx/)
+        call hydrogenic_dirac_spinor(r, state, state%m(m1), spinor)
 
-            norm(m1)= norm(m1) + dot_product((spinor),spinor) * grid%dx**3
-            ! write(28,*) r(1), r(3), real(dot_product(spinor, spinor))
-          end do
-        end do
+        norm(m1)= norm(m1) + dot_product((spinor),spinor) * grid%weight(i)
+        ! write(28,*) r(1), r(3), real(dot_product(spinor, spinor))
       end do
     end do
   end function
@@ -234,6 +219,8 @@ contains
 
     state%red_mass = mass * real(Z,dp) * amu / electron_mass / (mass + real(Z, dp) * amu / electron_mass)
     state%E = hydrogenic_dirac_energy(state)
+    write(*,*) "E = ", state%E, " for n  = ", state%n, ", l = ", state%l, ", j = ", state%j, ", k = ", state%k, " redmass = ",&
+    state%red_mass
   end subroutine set_quantum_numbers
 
   ! Hydrogenlike Dirac spinor, including both major and
@@ -271,7 +258,7 @@ contains
     end if
     ! We now need to multiply these by the appropriate 1/r, and the spin spherical harmonics
     ! dirac_spinor(1:2) = radial_spinor(1) / norm_r * weyl_spinor
-    dirac_spinor(1:2) = radial_spinor(1) * weyl_spinor 
+    dirac_spinor(1:2) = radial_spinor(1) * weyl_spinor  
 
     if(state%k > 0) then
       sgn_k = 1
@@ -342,7 +329,7 @@ contains
     
     if(n_r == 0) then
       A_plus_nk = 0.0_dp
-      else
+    else
       A_plus_nk = sqrt((C_nk * factorial(n_r - 1))/(gamma(n_r + 2.0_dp * gamma_k + 1.0_dp))) *&
                 & sqrt((n_r + gamma_k + gamma_k/k * sqrt(fine_structure**2 + (n_r + gamma_k)**2))/(2.0_dp * gamma_k**2/k**2 * &
                 & (fine_structure**2 + (n_r + gamma_k)**2))) 
@@ -353,6 +340,7 @@ contains
               & (fine_structure**2 + (n_r + gamma_k)**2))) 
 
     vector_prefactor = (2.0_dp * C_nk * norm_r)**gamma_k * exp(-C_nk * norm_r)
+    ! write(*,*) norm_r, vector_prefactor, A_plus_nk, A_minus_nk, C_nk, gamma_k
 
     if(A_plus_nk == 0.0_dp) then
 
@@ -559,25 +547,40 @@ contains
 
   end function
 
-  ! Calculates the full 3D wavefunction integrand for a given slice
-  subroutine write_integrand_grid_slice(state, dir, pos)
+  ! Reads in a Lebedev grid with positions and weights
+  subroutine read_in_grid(filename, grid)
     implicit none
 
-    ! State details
-    type(dirac_state), intent(in) :: state
+    character(len=*), intent(in)   :: filename
+    type(grid_type), intent(inout) :: grid
 
-    ! Cartesian direction to take slice in. 1 =x, 2= y, 3=z
-    integer, intent(in)           :: dir
+    integer :: i, istat, file_length
+    real(kind=dp) :: val
 
-    ! Coordinate in the direction to take the slice in
-    real(kind=dp), intent(in)     :: pos
+    open(30, file=filename)
 
-    integer :: i, j
-    real(kind=dp), dimension(3)   :: r
-
-    !$omp parallel do collapse(2)
+    file_length = 0
     do 
+      read(30,*, iostat=istat) val
+      if(istat /= 0) then
+        exit
+      else
+        file_length = file_length + 1
+      end if
+    end do
 
+    rewind(30)
+    allocate(grid%x(file_length))
+    allocate(grid%y(file_length))
+    allocate(grid%z(file_length))
+    allocate(grid%weight(file_length))
 
-  end subroutine write_integrand_grid_slice
+    do i = 1, file_length
+      read(30, *) grid%x(i), grid%y(i), grid%z(i), grid%weight(i)
+    end do
+    grid%x = grid%x
+    grid%y = grid%y
+    grid%z = grid%z
+    grid%weight = grid%weight
+  end subroutine
 end program dirac
