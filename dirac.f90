@@ -15,6 +15,7 @@ program dirac
     real(kind=dp)                            :: mass, red_mass
   end type dirac_state
 
+  ! Linearised grid
   type grid_type
     integer :: N ! num of points
     real(kind=dp) :: dx
@@ -22,17 +23,17 @@ program dirac
     real(kind=dp), dimension(:), allocatable :: x, y, z, weight
   end type grid_type
 
-  complex(dp), parameter :: cplx_zero = (0.0_dp, 0.0_dp)
-  ! real(kind=dp), parameter :: particle_mass = 206.76_dp
-  real(kind=dp), parameter :: particle_mass = 1.0_dp
-  integer,  parameter :: nuclear_Z = 79
-  real(dp), parameter :: pi = 3.14159265358979_dp 
+  complex(dp),   parameter :: cplx_zero = (0.0_dp, 0.0_dp)
+  real(kind=dp), parameter :: particle_mass = 206.76_dp
+  ! real(kind=dp), parameter :: particle_mass = 1.0_dp
+  integer,       parameter :: nuclear_Z = 1
+  real(dp),      parameter :: pi = 3.14159265358979_dp 
   real(kind=dp), parameter :: speed_of_light = 137.0_dp
   real(kind=dp), parameter :: fine_structure = 0.007297352_dp
   real(kind=dp), parameter :: amu = 1.66e-27_dp
   real(kind=dp), parameter :: electron_mass = 9.11e-31_dp
   real(kind=dp), parameter :: second =1.0_dp / 2.41888e-17_dp
-  real(dp), parameter :: factorial_table(0:20) = (/&
+  real(dp),      parameter :: factorial_table(0:20) = (/&
    1.0_dp, &
    1.0_dp, &
    2.0_dp, &
@@ -57,9 +58,6 @@ program dirac
 
   integer :: i, j, k, nuc_z, N, m1, m2
 
-  ! Define the Pauli \sigma vector
-  complex(kind=dp), dimension(3, 2, 2) :: pauli_vec
-
   ! Define the Dirac \alpha vector
   complex(kind=dp), dimension(3, 4, 4) :: alpha_vec
 
@@ -67,18 +65,13 @@ program dirac
   complex(kind=dp), dimension(4)  :: dirac_spinor1, dirac_spinor2
   complex(kind=dp),dimension(3)   :: wvfn_product
   real(kind=dp) :: dx, transition_energy, red_mass, x_min, final_average
-  real(kind=dp) :: bispin_integrand, normalisation1
   complex(kind=dp) :: integrand
 
   type(dirac_state) :: initial_state, final_state
   type(grid_type) :: grid
-  real(kind=dp), dimension(2) :: bispinor1, bispinor2, PQ_vec
   real(kind=dp), dimension(3) :: r
-  real(kind=dp)                 :: gamma_k, gauss_norm
-  real(kind=dp), dimension(2,2) :: prefactor_matrix
 
   ! Interface to the routine for calculating the radial part R(r)
-  ! For a Dirac spinor, this would be P/r and Q/r
   abstract interface 
     subroutine radial_function(r, ds, f) 
       import :: dp
@@ -93,38 +86,28 @@ program dirac
   procedure(radial_function), pointer :: radial 
 
   ! n, l, j, m, Z
+  ! This is our initial and final states of the transition
   call set_quantum_numbers(initial_state, 2, 1, 0.5_dp, particle_mass, nuclear_Z)
   call set_quantum_numbers(final_state, 1, 0, 0.5_dp, particle_mass, nuclear_Z)
 
-  ! Initialise Pauli matrices in the vector
-  pauli_vec(1,:,:) = reshape((/ 0.0_dp, 1.0_dp, 1.0_dp, 0.0_dp /), shape(pauli_vec(1,:,:)))
-  pauli_vec(2,:,:) = reshape((/ (0.0_dp,0.0_dp), (0.0_dp,1.0_dp), (0.0_dp,-1.0_dp), (0.0_dp,0.0_dp) /), shape(pauli_vec(2,:,:)))
-  pauli_vec(3,:,:) = reshape((/ 1.0_dp, 0.0_dp, 0.0_dp, -1.0_dp /), shape(pauli_vec(3,:,:)))
+  ! Initialise the Dirac \alpha vector
+  call set_alpha_vector(alpha_vec)
 
-  ! Define the \alpha vector
-  do i = 1, 3
-    alpha_vec(i,1:2, 1:2) = 0.0_dp
-    alpha_vec(i,3:4, 3:4) = 0.0_dp
-    alpha_vec(i,3:4, 1:2) = pauli_vec(i,:,:)
-    alpha_vec(i,1:2, 3:4) = pauli_vec(i,:,:)
-  end do
-
-  ! radial => gaussian_radial  
-  ! radial => constant_radial  
-  ! radial => mudirac_bispinor
+  ! Choose the radial function
   radial => hydrogenic_u_bispinor
-  ! call radial((/0.0_dp, 0.0_dp, 0.0_dp /),bispinor)
 
+  ! Read in the atomic grid
   call read_in_grid("lebedev_h.dat", grid)
   
+  ! Check that both states are properly normalised for all (n,k,m)
   initial_state%norms = check_spinor_normalisation(initial_state, grid)
   write(*,*) "Initial state norms for each m value = ", initial_state%norms
   final_state%norms = check_spinor_normalisation(final_state, grid)
   write(*,*) "Final state norms for each m value = ", final_state%norms
 
+  ! Calculation the transition energy
   transition_energy =  -hydrogenic_dirac_energy(final_state)&
   & + hydrogenic_dirac_energy(initial_state)
-  write(*,*) "Transition energy = ", transition_energy*27.2_dp
 
   final_average = 0.0_dp
   do m1 = 1, size(initial_state%m)
@@ -139,21 +122,23 @@ program dirac
       !$omp transition_energy, grid)&
       !$omp private(dirac_spinor1,dirac_spinor2, wvfn_product, r)  default(none) 
       do i = 1, size(grid%x)
+
+        ! Put the position into a 3-vector
         r = (/ grid%x(i), grid%y(i), grid%z(i) /)
-        ! write(*,*) r
+
+        ! Evaluate the wavefunctions for the initial and final states
         call hydrogenic_dirac_spinor(r, initial_state, initial_state%m(m1), dirac_spinor1)
         call hydrogenic_dirac_spinor(r, final_state, final_state%m(m2),  dirac_spinor2)
 
+        ! Find the matrix element for each \alpha
         wvfn_product(1) = dot_product((dirac_spinor2), matmul(alpha_vec(1,:,:), dirac_spinor1)) 
         wvfn_product(2) = dot_product((dirac_spinor2), matmul(alpha_vec(2,:,:), dirac_spinor1))
         wvfn_product(3) = dot_product((dirac_spinor2), matmul(alpha_vec(3,:,:), dirac_spinor1))
-        ! write(*,*) wvfn_product, initial_state%m(m1), final_state%m(m2)
-        ! integrand = integrand + dot_product(wvfn_product, wvfn_product) * grid%weight(i) &
+
+        ! Sum up each matrix element with the Lebedev weight
         integrand = integrand + sum(wvfn_product) * grid%weight(i) &
         & * spherical_bessel_zero(transition_energy/speed_of_light, norm2(r))
-        write(40+m1+m2, *) norm2(r), real(wvfn_product(2)*(wvfn_product(2)),dp) * grid%weight(i)
-        write(51,*) norm2(r), real(dot_product(dirac_spinor1, dirac_spinor1),dp)
-        ! write(71,*) r(1), r(3), real(dot_product(wvfn_product, wvfn_product))
+
       end do
 
       write(*,'(A, F4.1, A, F4.1, ES15.5)') "Total rate for m1 =  ", initial_state%m(m1), " m2 = ",final_state%m(m2),  &
@@ -168,6 +153,29 @@ program dirac
   deallocate(grid%x, grid%y, grid%z, grid%weight)
 
 contains
+
+  ! Initialise the Dirac \alpha vector i.e \alpha_i
+  subroutine set_alpha_vector(alpha_vec)
+    implicit none
+
+    complex(kind=dp), dimension(3,4,4), intent(out) :: alpha_vec
+
+    complex(kind=dp), dimension(3,2,2)              :: pauli_vec
+
+    integer :: i
+    ! Initialise Pauli matrices in the vector
+    pauli_vec(1,:,:) = reshape((/ 0.0_dp, 1.0_dp, 1.0_dp, 0.0_dp /), shape(pauli_vec(1,:,:)))
+    pauli_vec(2,:,:) = reshape((/ (0.0_dp,0.0_dp), (0.0_dp,1.0_dp), (0.0_dp,-1.0_dp), (0.0_dp,0.0_dp) /), shape(pauli_vec(2,:,:)))
+    pauli_vec(3,:,:) = reshape((/ 1.0_dp, 0.0_dp, 0.0_dp, -1.0_dp /), shape(pauli_vec(3,:,:)))
+
+    ! Define the \alpha vector
+    do i = 1, 3
+      alpha_vec(i,1:2, 1:2) = 0.0_dp
+      alpha_vec(i,3:4, 3:4) = 0.0_dp
+      alpha_vec(i,3:4, 1:2) = pauli_vec(i,:,:)
+      alpha_vec(i,1:2, 3:4) = pauli_vec(i,:,:)
+    end do
+  end subroutine
 
   ! Returns <psi|psi> on the grid
   function check_spinor_normalisation(state, grid) result(norm)
@@ -281,82 +289,6 @@ contains
 
   end subroutine
 
-  subroutine gaussian_radial(r, state, f)
-    implicit none
-
-    real(kind=dp), intent(in), dimension(3) :: r
-    type(dirac_state), intent(in)           :: state
-    real(kind=dp), intent(out), dimension(2) :: f
-
-    f = exp(-norm2(r)**2/2.0_dp)/sqrt(gamma(1.5_dp))
-  end subroutine
-  subroutine constant_radial(r, state, f)
-    implicit none
-
-    real(kind=dp), intent(in), dimension(3) :: r
-    type(dirac_state), intent(in)           :: state
-    real(kind=dp), intent(out), dimension(2) :: f
-
-    if(norm2(r) < 1.0_dp) then
-      f = 1.0_dp
-    else
-      f = 0.0_dp
-    end if
-  end subroutine
-  subroutine mudirac_bispinor(r, state, u_bispinor)
-    implicit none
-
-    real(kind=dp), dimension(3), intent(in)  :: r
-    type(dirac_state), intent(in)            :: state
-    real(kind=dp), dimension(2), intent(out) :: u_bispinor
-
-    ! sqrt(m^2 - E^2). Equivalent to K in mudirac
-    real(kind=dp) :: C_nk
-
-    ! sqrt(k^2 - alpha^2)
-    real(kind=dp) :: gamma_k
-
-    ! n - |k|
-    integer       :: n_r, k
-
-    real(kind=dp) :: A_plus_nk, A_minus_nk, rho, A, rhodep, E_k
-
-    real(kind=dp) :: vector_prefactor, norm_r, red_mass, lagP, lagM
-
-    ! Absolute value of r
-    norm_r = norm2(r)
-
-    if(norm_r == 0.0_dp) then
-      norm_r = tiny(1.0_dp)
-    end if
-
-    n_r = state%n - abs(state%k)
-    k = state%k
-
-    C_nk    = sqrt(state%red_mass**2*speed_of_light**2 - state%E**2/speed_of_light**2)
-    gamma_k = sqrt(state%k**2 - state%Z**2*fine_structure**2)
-    
-    rho = 2.0_dp * C_nk * norm_r
-    rhodep = (rho)*gamma_k * exp(-0.5 * rho)
-
-
-    if(state%k == -state%n) then
-      A = sqrt(C_nk / (2.0_dp * state%n * (state%n + gamma_k) * gamma_k * gamma(2.0_dp * gamma_k)))
-      u_bispinor(1) = A * (state%n + gamma_k) * rhodep 
-      u_bispinor(2) = -A * state%Z * fine_structure * rhodep 
-    else
-      E_k = state%E * state%k / (gamma_k * state%red_mass * speed_of_light**2)
-      A = sqrt(C_nk * factorial(state%n - abs(state%k) - 1)/(4.0_dp * state%k * (state%k - gamma_k) * &
-      & (state%n-abs(state%k)+gamma_k)*gamma(state%n-abs(state%k) + 2.0_dp * gamma_k + 1))) * (E_k + E_k**2)
-      lagP = rho * gen_laguerre_poly(state%n - abs(state%k) - 1, 2.0_dp * gamma_k + 1.0_dp, rho)
-      lagM = (gamma_k * state%red_mass * speed_of_light**2 - state%k*state%E) /(speed_of_light * C_nk) *&
-      & gen_laguerre_poly(state%n - abs(state%k), 2.0_dp * gamma_k - 1.0_dp, rho)
-      u_bispinor(1) = A*rhodep* (state%Z * fine_structure * lagP +(gamma_k - k) * lagM)
-      u_bispinor(2) = -A*rhodep* (state%Z * fine_structure * lagM +(gamma_k - k) * lagP)
-    end if
-    ! write(*,*) norm_r, rhodep, C_nk, A, gamma_k
-
-  end subroutine
   ! Hydrogenlike bispinor u
   subroutine hydrogenic_u_bispinor(r, state, u_bispinor)
     implicit none
@@ -643,9 +575,5 @@ contains
     do i = 1, file_length
       read(30, *) grid%x(i), grid%y(i), grid%z(i), grid%weight(i)
     end do
-    ! grid%x = grid%x/particle_mass
-    ! grid%y = grid%y/particle_mass
-    ! grid%z = grid%z/particle_mass
-    ! grid%weight = grid%weight
   end subroutine
 end program dirac
