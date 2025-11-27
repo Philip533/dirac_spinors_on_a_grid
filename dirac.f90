@@ -23,9 +23,9 @@ program dirac
   end type grid_type
 
   complex(dp), parameter :: cplx_zero = (0.0_dp, 0.0_dp)
-  real(kind=dp), parameter :: particle_mass = 206.76_dp
-  integer,  parameter :: nuclear_Z = 2
-  ! real(kind=dp), parameter :: particle_mass = 1.0_dp
+  ! real(kind=dp), parameter :: particle_mass = 206.76_dp
+  real(kind=dp), parameter :: particle_mass = 1.0_dp
+  integer,  parameter :: nuclear_Z = 79
   real(dp), parameter :: pi = 3.14159265358979_dp 
   real(kind=dp), parameter :: speed_of_light = 137.0_dp
   real(kind=dp), parameter :: fine_structure = 0.007297352_dp
@@ -93,13 +93,13 @@ program dirac
   procedure(radial_function), pointer :: radial 
 
   ! n, l, j, m, Z
-  call set_quantum_numbers(initial_state, 2, 1, 1.5_dp, particle_mass, nuclear_Z)
+  call set_quantum_numbers(initial_state, 2, 1, 0.5_dp, particle_mass, nuclear_Z)
   call set_quantum_numbers(final_state, 1, 0, 0.5_dp, particle_mass, nuclear_Z)
 
   ! Initialise Pauli matrices in the vector
   pauli_vec(1,:,:) = reshape((/ 0.0_dp, 1.0_dp, 1.0_dp, 0.0_dp /), shape(pauli_vec(1,:,:)))
-  pauli_vec(2,:,:) = reshape((/ (0.0_dp,0.0_dp), (0.0_dp,-1.0_dp), (0.0_dp,1.0_dp), (0.0_dp,0.0_dp) /), shape(pauli_vec(1,:,:)))
-  pauli_vec(3,:,:) = reshape((/ 1.0_dp, 0.0_dp, 0.0_dp, -1.0_dp /), shape(pauli_vec(1,:,:)))
+  pauli_vec(2,:,:) = reshape((/ (0.0_dp,0.0_dp), (0.0_dp,1.0_dp), (0.0_dp,-1.0_dp), (0.0_dp,0.0_dp) /), shape(pauli_vec(2,:,:)))
+  pauli_vec(3,:,:) = reshape((/ 1.0_dp, 0.0_dp, 0.0_dp, -1.0_dp /), shape(pauli_vec(3,:,:)))
 
   ! Define the \alpha vector
   do i = 1, 3
@@ -111,10 +111,11 @@ program dirac
 
   ! radial => gaussian_radial  
   ! radial => constant_radial  
+  ! radial => mudirac_bispinor
   radial => hydrogenic_u_bispinor
   ! call radial((/0.0_dp, 0.0_dp, 0.0_dp /),bispinor)
 
-  call read_in_grid("lebedev_he.dat", grid)
+  call read_in_grid("lebedev_h.dat", grid)
   
   initial_state%norms = check_spinor_normalisation(initial_state, grid)
   write(*,*) "Initial state norms for each m value = ", initial_state%norms
@@ -123,6 +124,7 @@ program dirac
 
   transition_energy =  -hydrogenic_dirac_energy(final_state)&
   & + hydrogenic_dirac_energy(initial_state)
+  write(*,*) "Transition energy = ", transition_energy*27.2_dp
 
   final_average = 0.0_dp
   do m1 = 1, size(initial_state%m)
@@ -138,24 +140,32 @@ program dirac
       !$omp private(dirac_spinor1,dirac_spinor2, wvfn_product, r)  default(none) 
       do i = 1, size(grid%x)
         r = (/ grid%x(i), grid%y(i), grid%z(i) /)
+        ! write(*,*) r
         call hydrogenic_dirac_spinor(r, initial_state, initial_state%m(m1), dirac_spinor1)
         call hydrogenic_dirac_spinor(r, final_state, final_state%m(m2),  dirac_spinor2)
 
         wvfn_product(1) = dot_product((dirac_spinor2), matmul(alpha_vec(1,:,:), dirac_spinor1)) 
         wvfn_product(2) = dot_product((dirac_spinor2), matmul(alpha_vec(2,:,:), dirac_spinor1))
         wvfn_product(3) = dot_product((dirac_spinor2), matmul(alpha_vec(3,:,:), dirac_spinor1))
-        wvfn_product = wvfn_product * grid%weight(i)
-        integrand = integrand + dot_product(wvfn_product, wvfn_product)
+        ! write(*,*) wvfn_product, initial_state%m(m1), final_state%m(m2)
+        ! integrand = integrand + dot_product(wvfn_product, wvfn_product) * grid%weight(i) &
+        integrand = integrand + sum(wvfn_product) * grid%weight(i) &
+        & * spherical_bessel_zero(transition_energy/speed_of_light, norm2(r))
+        write(40+m1+m2, *) norm2(r), real(wvfn_product(2)*(wvfn_product(2)),dp) * grid%weight(i)
+        write(51,*) norm2(r), real(dot_product(dirac_spinor1, dirac_spinor1),dp)
         ! write(71,*) r(1), r(3), real(dot_product(wvfn_product, wvfn_product))
       end do
 
       write(*,'(A, F4.1, A, F4.1, ES15.5)') "Total rate for m1 =  ", initial_state%m(m1), " m2 = ",final_state%m(m2),  &
-      &integrand  *(transition_energy) * second / speed_of_light * 4.0_dp / 3.0_dp
-      final_average = final_average + integrand  *(transition_energy) / speed_of_light *second * 4.0_dp / 3.0_dp
+      &integrand*conjg(integrand)  *(transition_energy) * second / speed_of_light * 4.0_dp / 3.0_dp
+      final_average = final_average + integrand*conjg(integrand)  *(transition_energy) / speed_of_light *second * 4.0_dp / 3.0_dp
     end do
   end do
 
-  write(*,'(A, ES15.5)') "Final total rate = ", final_average / (2.0_dp * initial_state%j + 1.0_dp)
+  write(*,'(A, ES15.5)') "Final total rate before averaging = ", final_average
+  write(*,'(A, ES15.5)') "Final total rate after averaging = ", final_average / size(initial_state%m)
+
+  deallocate(grid%x, grid%y, grid%z, grid%weight)
 
 contains
 
@@ -183,7 +193,6 @@ contains
         call hydrogenic_dirac_spinor(r, state, state%m(m1), spinor)
 
         norm(m1)= norm(m1) + dot_product((spinor),spinor) * grid%weight(i)
-        ! write(28,*) r(1), r(3), real(dot_product(spinor, spinor))
       end do
     end do
   end function
@@ -244,11 +253,12 @@ contains
 
     call radial(r, state, u_bispinor)
 
-    gamma_k = sqrt(state%k**2 - fine_structure**2)
-    prefactor_matrix(1,:) = (/ fine_structure, -(state%k - gamma_k) /)
-    prefactor_matrix(2,:) = (/ -(state%k - gamma_k), fine_structure /)
+    gamma_k = sqrt(state%k**2 - state%Z**2*fine_structure**2)
+    prefactor_matrix(1,:) = (/ state%Z*fine_structure, -(state%k - gamma_k) /)
+    prefactor_matrix(2,:) = (/ -(state%k - gamma_k), state%Z*fine_structure /)
 
     radial_spinor = 1.0_dp/(sqrt(2.0_dp*state%k*(state%k-gamma_k))) * matmul(prefactor_matrix, u_bispinor)
+    ! radial_spinor = u_bispinor
 
     call spin_spherical_harmonic(state%l, state%k, real(m,dp), r, weyl_spinor)
 
@@ -258,7 +268,7 @@ contains
     end if
     ! We now need to multiply these by the appropriate 1/r, and the spin spherical harmonics
     ! dirac_spinor(1:2) = radial_spinor(1) / norm_r * weyl_spinor
-    dirac_spinor(1:2) = radial_spinor(1) * weyl_spinor  
+    dirac_spinor(1:2) = radial_spinor(1) * weyl_spinor  /norm_r
 
     if(state%k > 0) then
       sgn_k = 1
@@ -267,7 +277,7 @@ contains
     end if
     call spin_spherical_harmonic(state%l-sgn_k, -state%k, real(m,dp), r, weyl_spinor)
     ! dirac_spinor(3:4) = -complex(0.0_dp, 1.0_dp) * radial_spinor(2) / norm_r * weyl_spinor
-    dirac_spinor(3:4) = -complex(0.0_dp, 1.0_dp) * radial_spinor(2)  * weyl_spinor 
+    dirac_spinor(3:4) = complex(0.0_dp, 1.0_dp) * radial_spinor(2)  * weyl_spinor  / norm_r
 
   end subroutine
 
@@ -292,6 +302,60 @@ contains
     else
       f = 0.0_dp
     end if
+  end subroutine
+  subroutine mudirac_bispinor(r, state, u_bispinor)
+    implicit none
+
+    real(kind=dp), dimension(3), intent(in)  :: r
+    type(dirac_state), intent(in)            :: state
+    real(kind=dp), dimension(2), intent(out) :: u_bispinor
+
+    ! sqrt(m^2 - E^2). Equivalent to K in mudirac
+    real(kind=dp) :: C_nk
+
+    ! sqrt(k^2 - alpha^2)
+    real(kind=dp) :: gamma_k
+
+    ! n - |k|
+    integer       :: n_r, k
+
+    real(kind=dp) :: A_plus_nk, A_minus_nk, rho, A, rhodep, E_k
+
+    real(kind=dp) :: vector_prefactor, norm_r, red_mass, lagP, lagM
+
+    ! Absolute value of r
+    norm_r = norm2(r)
+
+    if(norm_r == 0.0_dp) then
+      norm_r = tiny(1.0_dp)
+    end if
+
+    n_r = state%n - abs(state%k)
+    k = state%k
+
+    C_nk    = sqrt(state%red_mass**2*speed_of_light**2 - state%E**2/speed_of_light**2)
+    gamma_k = sqrt(state%k**2 - state%Z**2*fine_structure**2)
+    
+    rho = 2.0_dp * C_nk * norm_r
+    rhodep = (rho)*gamma_k * exp(-0.5 * rho)
+
+
+    if(state%k == -state%n) then
+      A = sqrt(C_nk / (2.0_dp * state%n * (state%n + gamma_k) * gamma_k * gamma(2.0_dp * gamma_k)))
+      u_bispinor(1) = A * (state%n + gamma_k) * rhodep 
+      u_bispinor(2) = -A * state%Z * fine_structure * rhodep 
+    else
+      E_k = state%E * state%k / (gamma_k * state%red_mass * speed_of_light**2)
+      A = sqrt(C_nk * factorial(state%n - abs(state%k) - 1)/(4.0_dp * state%k * (state%k - gamma_k) * &
+      & (state%n-abs(state%k)+gamma_k)*gamma(state%n-abs(state%k) + 2.0_dp * gamma_k + 1))) * (E_k + E_k**2)
+      lagP = rho * gen_laguerre_poly(state%n - abs(state%k) - 1, 2.0_dp * gamma_k + 1.0_dp, rho)
+      lagM = (gamma_k * state%red_mass * speed_of_light**2 - state%k*state%E) /(speed_of_light * C_nk) *&
+      & gen_laguerre_poly(state%n - abs(state%k), 2.0_dp * gamma_k - 1.0_dp, rho)
+      u_bispinor(1) = A*rhodep* (state%Z * fine_structure * lagP +(gamma_k - k) * lagM)
+      u_bispinor(2) = -A*rhodep* (state%Z * fine_structure * lagM +(gamma_k - k) * lagP)
+    end if
+    ! write(*,*) norm_r, rhodep, C_nk, A, gamma_k
+
   end subroutine
   ! Hydrogenlike bispinor u
   subroutine hydrogenic_u_bispinor(r, state, u_bispinor)
@@ -325,7 +389,7 @@ contains
     k = state%k
 
     C_nk    = sqrt(state%red_mass**2*speed_of_light**2 - state%E**2/speed_of_light**2)
-    gamma_k = sqrt(state%k**2 - fine_structure**2)
+    gamma_k = sqrt(state%k**2 - state%Z**2*fine_structure**2)
     
     if(n_r == 0) then
       A_plus_nk = 0.0_dp
@@ -347,11 +411,10 @@ contains
       u_bispinor(1) = 0.0_dp
     else
       u_bispinor(1) = vector_prefactor * A_plus_nk * 2.0_dp * C_nk * norm_r * gen_laguerre_poly(n_r - 1, 2.0_dp*gamma_k+1.0_dp,&
-                    & 2.0_dp*C_nk*norm_r) /norm_r
+                    & 2.0_dp*C_nk*norm_r) 
     end if
-    ! write(*,*) gen_laguerre_poly(n_r, 2.0_dp*gamma_k-1.0_dp,2.0_dp*C_nk*norm_r)
     u_bispinor(2) = vector_prefactor * A_minus_nk * gen_laguerre_poly(n_r, 2.0_dp*gamma_k-1.0_dp,&
-                  & 2.0_dp*C_nk*norm_r) /norm_r
+                  & 2.0_dp*C_nk*norm_r) 
 
   end subroutine
 
@@ -372,6 +435,7 @@ contains
       spin_harmonic(1) = 0.0_dp
     else
       spin_harmonic(1) = clebsch_gordon_spin_spherical_harmonics(k,m,1) * SphericalYCartesian(l, int(m-0.5), x)
+      ! write(*,*)clebsch_gordon_spin_spherical_harmonics(k,m,1) , " Up", l, k, m
     end if
 
     ! Down spin
@@ -379,6 +443,7 @@ contains
       spin_harmonic(2) = 0.0_dp
     else
       spin_harmonic(2) = clebsch_gordon_spin_spherical_harmonics(k,m,0) * SphericalYCartesian(l, int(m+0.5), x)
+      ! write(*,*)clebsch_gordon_spin_spherical_harmonics(k,m,2), " Down", l, k, m
     end if
 
 
@@ -578,9 +643,9 @@ contains
     do i = 1, file_length
       read(30, *) grid%x(i), grid%y(i), grid%z(i), grid%weight(i)
     end do
-    grid%x = grid%x
-    grid%y = grid%y
-    grid%z = grid%z
-    grid%weight = grid%weight
+    ! grid%x = grid%x/particle_mass
+    ! grid%y = grid%y/particle_mass
+    ! grid%z = grid%z/particle_mass
+    ! grid%weight = grid%weight
   end subroutine
 end program dirac
