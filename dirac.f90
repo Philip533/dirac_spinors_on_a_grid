@@ -4,7 +4,7 @@ program dirac
   use hydrogenic
   implicit none
 
-  integer :: i, j, k, nuc_z, N, m1, m2
+  integer :: i, j, k, nuc_z, N, m1, m2, n1, l1, n2, l2
 
   ! Define the Dirac \alpha vector
   complex(kind=dp), dimension(3, 4, 4) :: alpha_vec
@@ -18,7 +18,11 @@ program dirac
   type(dirac_state) :: initial_state_dir, final_state_dir
   type(grid_type) :: grid
   real(kind=dp), dimension(3) :: r
-  integer       :: nuclear_Z = 1
+  integer       :: nuclear_Z, num_args
+  character(len=12), dimension(:), allocatable :: args
+  character(len=7)                             :: iupac_transition
+  character(len=3)                             :: state1, state2
+  logical                                      :: s1, s2
 
   ! Interface to the routine for calculating the radial part R(r)
   abstract interface 
@@ -34,51 +38,78 @@ program dirac
 
   procedure(radial_function), pointer :: radial 
 
-  ! n, l, j, m, Z
-  ! This is our initial and final states of the transition
-  call set_schrodinger_quantum_numbers(initial_state_schro, 2, 1, particle_mass, nuclear_Z)
-  call set_schrodinger_quantum_numbers(final_state_schro, 1, 0, particle_mass, nuclear_Z)
+  ! Transition matrix
+  type(t_matrix) :: transition_matrix
 
-  call set_dirac_quantum_numbers(initial_state_dir, 2, 1, .false., particle_mass, nuclear_Z)
-  call set_dirac_quantum_numbers(final_state_dir, 1, 0, .true., particle_mass, nuclear_Z)
-  initial_state_dir%E = hydrogenic_dirac_energy(initial_state_dir)
-  final_state_dir%E = hydrogenic_dirac_energy(final_state_dir)
+
+  ! First argument is Z.
+  ! Second argument is the transition in IUPAC notation
+  num_args = command_argument_count()
+  allocate(args(num_args))
+  do i = 1, num_args
+    call get_command_argument(i, args(i))
+  end do
+
+  read(args(1), '(I2)') nuclear_Z
+  iupac_transition = args(2)
+  state1 = split_string(iupac_transition,"-", 2)
+  state2 = split_string(iupac_transition,"-", 1)
+  call iupac_to_atomic(state1, n1, l1, s1)
+  call iupac_to_atomic(state2, n2, l2, s2)
+
+  if(l1 >= n1) then
+    stop "l1 cannot be greater than n1"
+  else if(l2 >= n2) then
+    stop "l1 cannot be greater than n1"
+  end if
 
   ! Initialise the Dirac \alpha vector
   call set_alpha_vector(alpha_vec)
 
   ! Choose the radial function
-  radial => hydrogenic_u_bispinor
+  ! radial => hydrogenic_u_bispinor
+  radial => mudirac_bispinor
 
   ! Read in the atomic grid
   call read_in_grid("lebedev_h.dat", grid)
   
-  ! Relativistic calculation
-  call calculate_schrodinger_dipole(initial_state_schro, final_state_schro, final_average)
-  write(*,'(A, ES15.5)') "Final Schrodinger dipole rate after averaging = ", final_average / size(initial_state_schro%m)
-
-  call calculate_dirac_dipole(initial_state_dir, final_state_dir, final_average)
-
-  write(*,'(A, ES15.5)') "Final Dirac dipole rate after averaging = ", final_average / size(initial_state_dir%m)
-
-  call set_dirac_quantum_numbers(initial_state_dir, 3, 2, .true., particle_mass, nuclear_Z)
-  call set_dirac_quantum_numbers(final_state_dir, 1, 0, .true., particle_mass, nuclear_Z)
+  call set_dirac_quantum_numbers(initial_state_dir, n1, l1, s1, particle_mass, nuclear_Z)
+  call set_dirac_quantum_numbers(final_state_dir, n2, l2, s2, particle_mass, nuclear_Z)
   initial_state_dir%E = hydrogenic_dirac_energy(initial_state_dir)
   final_state_dir%E = hydrogenic_dirac_energy(final_state_dir)
 
-  call calculate_dirac_quadrupole(initial_state_dir, final_state_dir, final_average)
-  write(*,'(A, ES15.5)') "Final Dirac quadrupole rate after averaging = ", final_average / size(initial_state_dir%m)
+  ! First dimension is the first state, second dimension is second state
+  allocate(transition_matrix%T(size(initial_state_dir%m), size(final_state_dir%m)))
+  transition_matrix%k1 = initial_state_dir%k; transition_matrix%k2 = final_state_dir%k
+  transition_matrix%m1 = initial_state_dir%m; transition_matrix%m2 = final_state_dir%m
+
+  ! Check if we have dipole or quadrupole
+  if (abs(l2 - l1) == 1) then
+
+    call calculate_dirac_dipole(initial_state_dir, final_state_dir, transition_matrix)
+
+  else if (abs(l2 - l1) == 2 .or. abs(l2 - l1) == 0) then
+
+    call calculate_dirac_quadrupole(initial_state_dir, final_state_dir, transition_matrix)
+
+  end if
+
+  ! We have a total rate that needs to be averaged over the number of starting m states
+  transition_matrix%total_rate = transition_matrix%total_rate/(size(initial_state_dir%m))
+
+  call write_transition_matrix(transition_matrix)
+
   deallocate(grid%x, grid%y, grid%z, grid%weight)
 
 contains
 
-  subroutine calculate_dirac_quadrupole(initial_state, final_state, rate)
+  subroutine calculate_dirac_quadrupole(initial_state, final_state, transition_matrix)
     implicit none
 
-    type(dirac_state), intent(in)  :: initial_state, final_state
-    real(kind=dp),     intent(out) :: rate
+    type(dirac_state),                          intent(in)    :: initial_state, final_state
+    type(t_matrix),                             intent(inout) :: transition_matrix
 
-    real(kind=dp) :: transition_energy, integrand
+    real(kind=dp) :: transition_energy, integrand, rate
     complex(kind=dp),dimension(3)   :: wvfn_product
     complex(kind=dp) :: xax, yax, zax, xay, yay, zay, xaz, yaz, zaz
 
@@ -91,8 +122,7 @@ contains
         xay = 0.0_dp; yay = 0.0_dp; zay = 0.0_dp
         xaz = 0.0_dp; yaz = 0.0_dp; zaz = 0.0_dp
         if (abs(initial_state%m(m1) - final_state%m(m2)) > 2) then
-          write(*,*) "magnetic transition m1 = ", initial_state%m(m1) , " to m2 = ", &
-          & final_state%m(m2) ," is not allowed for quadrupole transition"
+          transition_matrix%T(m1, m2) = 0.0_dp
           cycle
         end if
         integrand = 0.0_dp
@@ -124,15 +154,21 @@ contains
                   & + 2.0_dp * (conjg(yax) * yax + conjg(yaz) * yaz + conjg(zax) * zax) &
                   & - yaz * zay + 2.0_dp * conjg(zay) * zay - yay * zaz &
                   & + conjg(zaz) * zaz - xax * yay -  xax * zaz)
-        write(*,'(A, F4.1, A, F4.1, ES15.5)') "Total rate for m1 =  ", initial_state%m(m1), " m2 = ",final_state%m(m2),  &
-        & integrand *(transition_energy) / speed_of_light / (2.0_dp * pi) * (8.0_dp * pi / 15.0_dp)
+        integrand = 0.5_dp*(4.0_dp * xay * conjg(xay) + 4.0_dp * xaz * conjg(xaz) - conjg(xay) * yax &
+                  & - xay * conjg(yax)+ 4.0_dp*yax*conjg(yax) - conjg(xax) * yay + 2.0_dp * yay * conjg(yay) &
+                  & + 4.0_dp * yaz * conjg(yaz) - conjg(xaz) * zax - xaz * conjg(zax) &
+                  & + 4.0_dp * zax * conjg(zax) - conjg(yaz) * zay - yaz * conjg(zay) &
+                  & + 4.0_dp  * zay * conjg(zay) - conjg(xax) * zaz - conjg(yay) * zaz &
+                  & + xax * (2.0_dp * conjg(xax) - conjg(yay) - conjg(zaz)) - yay * conjg(zaz) & 
+                  & + 2.0_dp * zaz * conjg(zaz))
         rate = rate + integrand 
+        transition_matrix%T(m1,m2) = integrand  *(transition_energy) / speed_of_light / (2.0_dp * pi) * (8.0_dp * pi / 15.0_dp)
         
         
       end do
     end do
 
-    rate = rate * transition_energy/speed_of_light / (2.0_dp * pi) * second * (8.0_dp * pi / 15.0_dp)
+    transition_matrix%total_rate = rate * transition_energy/speed_of_light / (2.0_dp * pi) * second * (8.0_dp * pi / 15.0_dp)
   end subroutine
   subroutine calculate_schrodinger_dipole(initial_state, final_state, rate)
     implicit none
@@ -182,13 +218,13 @@ contains
       end do
     end do
   end subroutine
-  subroutine calculate_dirac_dipole(initial_state, final_state, rate)
+  subroutine calculate_dirac_dipole(initial_state, final_state, transition_matrix)
     implicit none
 
-    type(dirac_state), intent(in)  :: initial_state, final_state
-    real(kind=dp),     intent(out) :: rate
+    type(dirac_state),   intent(in)  :: initial_state, final_state
+    type(t_matrix),    intent(inout) :: transition_matrix
 
-    real(kind=dp) :: transition_energy
+    real(kind=dp) :: transition_energy, final_average
     complex(kind=dp) :: integrand
     complex(kind=dp),dimension(3)   :: wvfn_product
 
@@ -202,14 +238,9 @@ contains
     do m1 = 1, size(initial_state%m)
       do m2 = 1, size(final_state%m)
         if (abs(initial_state%m(m1) - final_state%m(m2)) > 1) then
-          write(*,*) "magnetic transition m1 = ", initial_state%m(m1) , " to m2 = ", &
-          & final_state%m(m2) ," is not allowed for dipole transition"
           cycle
         end if
         integrand = 0.0_dp
-        !$omp parallel do reduction(+:integrand) shared(alpha_vec,initial_state,final_state,m1,m2, &
-        !$omp transition_energy, grid)&
-        !$omp private(dirac_spinor1,dirac_spinor2, wvfn_product, r)  default(none) 
         do i = 1, size(grid%x)
 
           ! Put the position into a 3-vector
@@ -230,11 +261,12 @@ contains
 
         end do
 
-        write(*,'(A, F4.1, A, F4.1, ES15.5)') "Total rate for m1 =  ", initial_state%m(m1), " m2 = ",final_state%m(m2),  &
-        &integrand*conjg(integrand)  *(transition_energy) * second / speed_of_light * 4.0_dp / 3.0_dp
-        rate = rate + integrand*conjg(integrand)  *(transition_energy) / speed_of_light *second * 4.0_dp / 3.0_dp
+        final_average = final_average + integrand * conjg(integrand) * transition_energy/speed_of_light*4.0_dp/3.0_dp*second
+        transition_matrix%T(m1,m2) = integrand  *conjg(integrand) *transition_energy / speed_of_light * 4.0_dp / 3.0_dp
       end do
     end do
+    transition_matrix%total_rate = final_average
+
   end subroutine
   ! Returns <psi|psi> on the grid
   function check_spinor_normalisation(state, grid) result(norm)
@@ -288,11 +320,11 @@ contains
     call radial(r, state, u_bispinor)
 
     gamma_k = sqrt(state%k**2 - state%Z**2*fine_structure**2)
-    prefactor_matrix(1,:) = (/ state%Z*fine_structure, -(state%k - gamma_k) /)
-    prefactor_matrix(2,:) = (/ -(state%k - gamma_k), state%Z*fine_structure /)
+    ! prefactor_matrix(1,:) = (/ state%Z*fine_structure, -(state%k - gamma_k) /)
+    ! prefactor_matrix(2,:) = (/ -(state%k - gamma_k), state%Z*fine_structure /)
 
-    radial_spinor = 1.0_dp/(sqrt(2.0_dp*state%k*(state%k-gamma_k))) * matmul(prefactor_matrix, u_bispinor)
-    ! radial_spinor = u_bispinor
+    ! radial_spinor = 1.0_dp/(sqrt(2.0_dp*state%k*(state%k-gamma_k))) * matmul(prefactor_matrix, u_bispinor)
+    radial_spinor = u_bispinor
 
     call spin_spherical_harmonic(state%l, state%k, real(m,dp), r, weyl_spinor)
 
@@ -353,8 +385,9 @@ contains
       A_plus_nk = 0.0_dp
     else
       A_plus_nk = sqrt((C_nk * factorial(n_r - 1))/(gamma(n_r + 2.0_dp * gamma_k + 1.0_dp))) *&
-                & sqrt((n_r + gamma_k + gamma_k/k * sqrt(fine_structure**2 + (n_r + gamma_k)**2))/(2.0_dp * gamma_k**2/k**2 * &
-                & (fine_structure**2 + (n_r + gamma_k)**2))) 
+                & sqrt((n_r + gamma_k + gamma_k/k * sqrt(state%Z**2*fine_structure**2 + (n_r + gamma_k)**2))&
+                /(2.0_dp * gamma_k**2/k**2 *(state%Z**2*fine_structure**2 + (n_r + gamma_k)**2))) 
+      ! write(*,*) "APLUS = ", a_plus_nk 
     end if
 
     A_minus_nk = sqrt((C_nk * factorial(n_r))/(gamma(n_r + 2.0_dp * gamma_k))) *&
@@ -375,7 +408,60 @@ contains
                   & 2.0_dp*C_nk*norm_r) 
 
   end subroutine
+  subroutine mudirac_bispinor(r, state, u_bispinor)
+    implicit none
 
+    real(kind=dp), dimension(3), intent(in)  :: r
+    type(dirac_state), intent(in)            :: state
+    real(kind=dp), dimension(2), intent(out) :: u_bispinor
+
+    ! sqrt(m^2 - E^2). Equivalent to K in mudirac
+    real(kind=dp) :: C_nk
+
+    ! sqrt(k^2 - alpha^2)
+    real(kind=dp) :: gamma_k
+
+    ! n - |k|
+    integer       :: n_r, k
+
+    real(kind=dp) :: A_plus_nk, A_minus_nk, rho, A, rhodep, E_k
+
+    real(kind=dp) :: vector_prefactor, norm_r, red_mass, lagP, lagM
+
+    ! Absolute value of r
+    norm_r = norm2(r)
+
+    if(norm_r == 0.0_dp) then
+      norm_r = tiny(1.0_dp)
+    end if
+
+    n_r = state%n - abs(state%k)
+    k = state%k
+
+    C_nk    = sqrt(state%red_mass**2*speed_of_light**2 - state%E**2/speed_of_light**2)
+    gamma_k = sqrt(state%k**2 - state%Z**2*fine_structure**2)
+    
+    rho = 2.0_dp * C_nk * norm_r
+    rhodep = (rho)**gamma_k * exp(-0.5 * rho)
+
+
+    if(n_r == 0) then
+      A = sqrt(C_nk / (2.0_dp * state%n * (state%n + gamma_k) * gamma_k * gamma(2.0_dp * gamma_k)))
+      u_bispinor(1) = A * (state%n + gamma_k) * rhodep 
+      u_bispinor(2) = -A * state%Z * fine_structure * rhodep 
+    else
+      E_k = state%E * state%k / (gamma_k * state%red_mass * speed_of_light**2)
+      A = sqrt(C_nk * factorial(state%n - abs(state%k) - 1)/(4.0_dp * state%k * (state%k - gamma_k) * &
+      & (state%n-abs(state%k)+gamma_k)*gamma(state%n-abs(state%k) + 2.0_dp * gamma_k + 1.0_dp)) * (E_k + E_k**2))
+      lagP = rho * gen_laguerre_poly(state%n - abs(state%k) - 1, 2.0_dp * gamma_k + 1.0_dp, rho)
+      lagM = (gamma_k * state%red_mass * speed_of_light**2 - state%k*state%E) /(speed_of_light * C_nk) *&
+      & gen_laguerre_poly(state%n - abs(state%k), 2.0_dp * gamma_k - 1.0_dp, rho)
+      u_bispinor(1) = A*rhodep* (state%Z * fine_structure * lagP +(gamma_k - k) * lagM)
+      u_bispinor(2) = -A*rhodep* (state%Z * fine_structure * lagM +(gamma_k - k) * lagP)
+    end if
+    ! write(*,*) norm_r, rhodep, C_nk, A, gamma_k
+
+  end subroutine
   ! Multiplies correct spherical harmonics by the appropriate
   ! CG coefficients to form the spin spherical harmonics, which are
   ! a 2-vector
@@ -389,7 +475,7 @@ contains
 
 
     ! Up spin
-    if(abs(int(m-0.5_dp)) > l ) then
+    if(m == (k+0.5_dp) ) then
       spin_harmonic(1) = 0.0_dp
     else
       spin_harmonic(1) = clebsch_gordon_spin_spherical_harmonics(k,m,1) * SphericalYCartesian(l, int(m-0.5), x)
@@ -397,7 +483,7 @@ contains
     end if
 
     ! Down spin
-    if(abs(int(m+0.5_dp)) > l ) then
+    if(m ==(-k - 0.5_dp)) then
       spin_harmonic(2) = 0.0_dp
     else
       spin_harmonic(2) = clebsch_gordon_spin_spherical_harmonics(k,m,0) * SphericalYCartesian(l, int(m+0.5), x)
@@ -453,36 +539,4 @@ contains
     !- mu * speed_of_light**2
   end function hydrogenic_dirac_energy
 
-  ! Reads in a Lebedev grid with positions and weights
-  subroutine read_in_grid(filename, grid)
-    implicit none
-
-    character(len=*), intent(in)   :: filename
-    type(grid_type), intent(inout) :: grid
-
-    integer :: i, istat, file_length
-    real(kind=dp) :: val
-
-    open(30, file=filename)
-
-    file_length = 0
-    do 
-      read(30,*, iostat=istat) val
-      if(istat /= 0) then
-        exit
-      else
-        file_length = file_length + 1
-      end if
-    end do
-
-    rewind(30)
-    allocate(grid%x(file_length))
-    allocate(grid%y(file_length))
-    allocate(grid%z(file_length))
-    allocate(grid%weight(file_length))
-
-    do i = 1, file_length
-      read(30, *) grid%x(i), grid%y(i), grid%z(i), grid%weight(i)
-    end do
-  end subroutine
 end program dirac

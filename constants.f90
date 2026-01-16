@@ -11,6 +11,7 @@ module constants
   real(kind=dp), parameter :: fine_structure = 0.007297352_dp
   real(kind=dp), parameter :: amu = 1.66e-27_dp
   real(kind=dp), parameter :: electron_mass = 9.11e-31_dp
+  real(kind=dp), parameter :: hartree = 27.2114079527_dp
   real(kind=dp), parameter :: second =1.0_dp / 2.41888e-17_dp
   real(dp),      parameter :: factorial_table(0:20) = (/&
    1.0_dp, &
@@ -47,8 +48,8 @@ module constants
   end type schrodinger_state
 
   type, extends(schrodinger_state) :: dirac_state 
-    real(kind=dp) :: j ! total
-    integer       :: k ! dirac
+    real(kind=dp)                              :: j ! total
+    integer                                    :: k ! dirac
   end type dirac_state
 
   type grid_type
@@ -57,4 +58,12 @@ module constants
     real(kind=dp) :: x_min ! max value in 1 dimension
     real(kind=dp), dimension(:), allocatable :: x, y, z, weight
   end type grid_type
+
+  type t_matrix
+    integer :: k1, k2 ! Start and end k values
+    real(kind=dp), dimension(:), allocatable :: m1, m2 ! m_j values for each state
+    real(kind=dp), dimension(:,:), allocatable :: T
+    real(kind=dp) :: total_rate
+  end type
+
  end module constants

@@ -4,7 +4,89 @@ module utils
 
 contains
 
+  subroutine write_transition_matrix(transition_matrix)
+    implicit none
 
+    type(t_matrix),    intent(in)              :: transition_matrix
+
+
+    integer :: i, j
+
+    write(*,'(A)') '#####################################################'
+    write(*,'(A,I2, A, I2)') '# TransitionMatrix from state with k = ',transition_matrix%k1," to state with k = &
+                             & ", transition_matrix%k2
+    write(*,'(A, ES11.5, A)') '# Total rate = ', transition_matrix%total_rate, " s^-1"
+    write(*,'(A)') '#####################################################'
+    write(*,'(15X)', advance="no")
+    do i = 0, size(transition_matrix%m1)
+      
+      do j = 1, size(transition_matrix%m2)
+        if(i == 0) then
+          if(j == size(transition_matrix%m2)) then
+            write(*,'(F4.1)',advance="yes")  transition_matrix%m2(j)
+          else
+            write(*,'(F4.1, 11X)',advance="no") transition_matrix%m2(j)
+          end if
+        end if
+      end do
+
+        if(i /= 0) then
+          do j = 0, size(transition_matrix%m2)
+            if(j==0) then
+              write(*,'(F4.1, 4X)', advance="no") transition_matrix%m1(i)
+            else if(j/=0 .and. j /= size(transition_matrix%m2)) then
+
+              if(transition_matrix%T(i,j) == 0) then
+                write(*,'(10X,I1, 4X)', advance="no") int(transition_matrix%T(i,j))
+              else
+                write(*,'(ES11.5, 4X)', advance="no") transition_matrix%T(i,j)
+              end if
+            else if(j== size(transition_matrix%m2)) then
+              if(transition_matrix%T(i,j) == 0) then
+                write(*,'(10X,I1, 4X)', advance="yes") int(transition_matrix%T(i,j))
+              else
+                write(*,'(ES11.5, 4X)', advance="yes") transition_matrix%T(i,j)
+              end if
+            end if
+
+          end do
+      end if 
+
+    end do
+  end subroutine write_transition_matrix
+
+  ! Reads in a Lebedev grid with positions and weights
+  subroutine read_in_grid(filename, grid)
+    implicit none
+
+    character(len=*), intent(in)   :: filename
+    type(grid_type), intent(inout) :: grid
+
+    integer :: i, istat, file_length
+    real(kind=dp) :: val
+
+    open(30, file=filename)
+
+    file_length = 0
+    do 
+      read(30,*, iostat=istat) val
+      if(istat /= 0) then
+        exit
+      else
+        file_length = file_length + 1
+      end if
+    end do
+
+    rewind(30)
+    allocate(grid%x(file_length))
+    allocate(grid%y(file_length))
+    allocate(grid%z(file_length))
+    allocate(grid%weight(file_length))
+
+    do i = 1, file_length
+      read(30, *) grid%x(i), grid%y(i), grid%z(i), grid%weight(i)
+    end do
+  end subroutine
   subroutine set_schrodinger_quantum_numbers(state, n, l, mass, Z)
     implicit none
 
@@ -196,4 +278,68 @@ contains
 
 
   end function SphericalYCartesian
+  function split_string(string,sep,column)
+    implicit none
+
+    character(len=*), intent(in)   :: string
+    character(len=1), intent(in)   :: sep
+    integer, intent(in)            :: column
+    character(len=:), allocatable  :: split_string
+
+    character(len=:), allocatable :: temp
+    character(len=:), allocatable :: work
+
+    integer :: i, cnt, lastpos
+    
+    cnt = 0
+    lastpos = 0
+    split_string = ""
+   
+    temp = string//sep
+    do i = 1, len_trim(temp)
+      if(temp(i:i) == sep)then
+        cnt = cnt + 1
+        if(cnt == column) then
+          work = temp(lastpos+1:i-1)
+          exit
+        end if
+        lastpos = i
+      end if
+    end do
+    split_string = work
+  end function split_string
+    subroutine iupac_to_atomic(istate, n, l, s)
+    implicit none
+
+    character(len=*), intent(in)  :: istate
+    integer,          intent(out) :: n, l
+    logical,          intent(out) :: s
+    integer                       :: length
+    character(len=1)              :: shell
+    character(len=2)              :: trimstate
+    integer                       :: orbit
+
+    length = len(istate)
+
+    ! Catch the edge case for K
+    if (length < 2) then
+      if (istate == "K") then
+        n = 1
+        l = 0
+        s = .false.
+      else
+        stop "Invalid IUPAC state"
+      end if
+    end if
+
+    ! Trim the whitespace and split the IUPAC into letter and number
+    trimstate = trim(adjustl(istate))
+    shell = trimstate(1:1)
+    read(trimstate(2:2),*)orbit
+
+    ! Calculate the quantum numbers
+    n = ichar(shell) - 74
+    l = orbit/2
+    s = (mod(orbit,2)) == 1
+  end subroutine
 end module utils
