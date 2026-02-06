@@ -1,4 +1,5 @@
 module constants
+  use fgsl
   use iso_fortran_env, only : dp => real64
   implicit none
 
@@ -13,6 +14,7 @@ module constants
   real(kind=dp), parameter :: electron_mass = 9.11e-31_dp
   real(kind=dp), parameter :: hartree = 27.2114079527_dp
   real(kind=dp), parameter :: second =1.0_dp / 2.41888e-17_dp
+  real(kind=dp), parameter :: bohr_radius = 5.291772e-11_dp
   real(dp),      parameter :: factorial_table(0:20) = (/&
    1.0_dp, &
    1.0_dp, &
