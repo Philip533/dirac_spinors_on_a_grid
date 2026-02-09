@@ -14,11 +14,11 @@ program dirac
   real(kind=dp) :: dx, transition_energy, red_mass, x_min, final_average
   complex(kind=dp) :: integrand
 
-  type(schrodinger_state) :: initial_state_schro, final_state_schro
-  type(dirac_state) :: initial_state, final_state
+  type(schrodinger_state) :: initial_state_schro, final_state_schro, e_f, e_i
+  type(dirac_state) :: mu_i, mu_f
   type(grid_type) :: grid
   real(kind=dp), dimension(3) :: r
-  integer       :: nuclear_Z, num_args
+  integer       :: nuclear_Z, num_args, multipolarity
   character(len=12), dimension(:), allocatable :: args
   character(len=7)                             :: iupac_transition
   character(len=3)                             :: state1, state2
@@ -40,7 +40,10 @@ program dirac
   procedure(radial_function), pointer :: radial 
 
   ! Transition matrix
-  type(t_matrix) :: transition_matrix
+  type(t_matrix) :: transition_matrix, elec_transition_matrix
+
+  ! We have a 2d Array of dimension (2*le+1) * (2*lep+1)
+  type(t_matrix), allocatable, dimension(:,:)  :: auger_transition_matrix
 
 
   ! First argument is Z.
@@ -58,6 +61,7 @@ program dirac
   call iupac_to_atomic(state1, n1, l1, s1)
   call iupac_to_atomic(state2, n2, l2, s2)
 
+  multipolarity = abs(l1-l2)
   if(l1 >= n1) then
     stop "l1 cannot be greater than n1"
   else if(l2 >= n2) then
@@ -72,23 +76,50 @@ program dirac
   radial => mudirac_bispinor
 
   ! Read in the atomic grid
-  call read_in_grid("lebedev_He.dat", grid)
+  call read_in_grid("lebedev_he.dat", grid)
   
-  call set_dirac_quantum_numbers(initial_state, n1, l1, s1, particle_mass, nuclear_Z)
-  call set_dirac_quantum_numbers(final_state, n2, l2, s2, particle_mass, nuclear_Z)
-  initial_state%E = hydrogenic_dirac_energy(initial_state)
-  final_state%E = hydrogenic_dirac_energy(final_state)
+  call set_dirac_quantum_numbers(mu_i, n1, l1, s1, particle_mass, nuclear_Z)
+  call set_dirac_quantum_numbers(mu_f, n2, l2, s2, particle_mass, nuclear_Z)
+  mu_i%E = hydrogenic_dirac_energy(mu_i)
+  mu_f%E = hydrogenic_dirac_energy(mu_f)
 
   ! First dimension is the first state, second dimension is second state
-  allocate(transition_matrix%T(size(initial_state%m), size(final_state%m)))
-  transition_matrix%k1 = initial_state%k; transition_matrix%k2 = final_state%k
-  transition_matrix%m1 = initial_state%m; transition_matrix%m2 = final_state%m
+  allocate(transition_matrix%T(size(mu_i%m), size(mu_f%m)))
+  transition_matrix%k1 = mu_i%k; transition_matrix%k2 = mu_f%k
+  transition_matrix%m1 = mu_i%m; transition_matrix%m2 = mu_f%m
+  ! We want a 1x3 vector of matrices for our electron magnetic numbers
 
-  call calculate_auger_dipole(initial_state, final_state)
-  call calculate_dirac_dipole(initial_state, final_state, transition_matrix)
+  ! Initial electron bound_state in 1s
+  call set_schrodinger_quantum_numbers(e_i, 1, 0, 1.0_dp, mu_i%Z)
+
+
+  allocate(auger_transition_matrix(1, 2*multipolarity+1))
+  do i = 1, 2*multipolarity+1
+    allocate(auger_transition_matrix(1,i)%T(size(mu_i%m), size(mu_f%m)))
+    auger_transition_matrix(1,i)%k1 = mu_i%k; auger_transition_matrix(1,i)%k2 = mu_f%k
+    auger_transition_matrix(1,i)%m1 = mu_i%m; auger_transition_matrix(1,i)%m2 = mu_f%m
+  end do
+
+  ! Unbound state of the electron. Use n = -1
+  call set_schrodinger_quantum_numbers(e_f, -1, multipolarity, 1.0_dp, mu_i%Z)
+
+
+  ! We are interesting in 1s auger electron currently. Therefore lep = 0, 
+  call calculate_auger_dipole(mu_i, mu_f, e_i, e_f, auger_transition_matrix)
+
+  call calculate_dirac_quadrupole(mu_i, mu_f, transition_matrix)
+
+  do i = 1, size(e_f%m)
+
+    write(*,'(A, I1, A, I2)') "Unbound electron state with l = ", e_f%l, " and m = ", int(e_f%m(i))
+    auger_transition_matrix(1,i)%total_rate = sum(auger_transition_matrix(1,i)%T) * second
+    call write_transition_matrix(auger_transition_matrix(1,i))
+    write(*,*) 
+
+  end do
 
   ! We have a total rate that needs to be averaged over the number of starting m states
-  transition_matrix%total_rate = transition_matrix%total_rate/(size(initial_state%m))
+  transition_matrix%total_rate = transition_matrix%total_rate/(size(mu_i%m))
 
   call write_transition_matrix(transition_matrix)
 
@@ -97,13 +128,15 @@ program dirac
 contains
 
   ! Calculates Auger dipole rate. i.e a 1s electron goes to an l = 1 unbound state
-  subroutine calculate_auger_dipole(initial_state, final_state)
+  subroutine calculate_auger_dipole(mu_i, mu_f, e_i, e_f, tmat)
     implicit none
 
-    type(dirac_state), intent(in) :: initial_state, final_state
+    type(dirac_state), intent(in)       ::  mu_i, mu_f
+    type(schrodinger_state), intent(in) ::  e_i, e_f
+    type(t_matrix), dimension(:,:), allocatable, intent(inout) :: tmat
 
     real(kind=dp) :: transition_energy
-    type(schrodinger_state) :: elec_bound_state
+    ! type(schrodinger_state) :: elec_bound_state
 
     complex(kind=dp), dimension(4) :: elec_unbound_wvfn
     real(kind=dp)                  ::  r_ij, coulomb_operator, elec_norm
@@ -112,66 +145,67 @@ contains
     complex(kind=dp), dimension(4)  :: dirac_spinor1, dirac_spinor2
     complex(kind=dp), dimension(4)  :: initial_product_state, final_product_state
     real(kind=dp),    dimension(3)  :: r_mu, r_elec
-    integer                         :: elec_m
+    integer                         :: elec_m, mi, mf, me, mep,i,j,k
+    integer, dimension(:), allocatable :: elec_unbound_m
 
-    transition_energy =  -hydrogenic_dirac_energy(final_state)&
-    & + hydrogenic_dirac_energy(initial_state)
+    transition_energy =  -hydrogenic_dirac_energy(mu_i)&
+    & + hydrogenic_dirac_energy(mu_f)
     ! write(*,*) initial_state%E- final_state%E
 
-    call set_schrodinger_quantum_numbers(elec_bound_state, 1, 0, 1.0_dp, initial_state%Z)
-    transition_energy = transition_energy - hydrogenic_schro_energy(elec_bound_state)
+    transition_energy = transition_energy - hydrogenic_schro_energy(e_i)
+
+    ! Allocate our transition matrix
 
     integrand = 0.0_dp
     total = 0.0_dp
-    m1 = 1
-    m2 = 1
-    elec_m = 0
-    ! do elec_m = -1, 1
-      write(*,*) "Normalisation = ", check_spinor_normalisation(initial_state, grid)
-      elec_norm = 0.0_dp
-    do i = 1, size(grid%x)
+    do me = 1, size(e_f%m)
+      do mep = 1, size(e_i%m)
+        total = 0.0_dp
+        do mi = 1, size(mu_i%m)
+          do mf = 1, size(mu_f%m)
+            integrand = 0.0_dp
+            do i = 1, size(grid%x)
 
-      integrand = 0.0_dp
-      ! Muonic states
-      r_mu = (/ grid%x(i)/200, grid%y(i)/200, grid%z(i)/200 /)
-      call hydrogenic_dirac_spinor(r_mu, initial_state, initial_state%m(m1), dirac_spinor1)
-      call hydrogenic_dirac_spinor(r_mu, final_state, final_state%m(m2), dirac_spinor2)
-      write(83,*) norm2(r_mu), real(dot_product(dirac_spinor2, dirac_spinor1))*norm2(r_mu)**3
-      !$omp parallel do reduction(+:integrand, elec_norm) default(none) shared(r_mu, dirac_spinor1, dirac_spinor2, grid, &
-      !$omp transition_energy, initial_state, elec_m, i, elec_bound_state)  &
-      !$omp private(r_elec, elec_unbound_wvfn, elec_bound_wvfn,initial_product_state, final_product_state, &
-      !$omp coulomb_operator, j)
-      do j = 1, size(grid%x)
+              ! Muonic states
+              r_mu = (/ grid%x(i)/200, grid%y(i)/200, grid%z(i)/200 /)
+              call hydrogenic_dirac_spinor(r_mu, mu_i, mu_i%m(mi), dirac_spinor1)
+              call hydrogenic_dirac_spinor(r_mu, mu_f, mu_f%m(mf), dirac_spinor2)
+              write(83,*) norm2(r_mu), real(dot_product(dirac_spinor2, dirac_spinor1))*norm2(r_mu)**3
+              !$omp parallel do reduction(+:integrand, elec_norm) default(none) shared(r_mu, dirac_spinor1, dirac_spinor2, grid, &
+              !$omp transition_energy, mu_i, me, i, e_i, e_f,  mep, elec_unbound_m)  &
+              !$omp private(r_elec, elec_unbound_wvfn, elec_bound_wvfn,initial_product_state, final_product_state, &
+              !$omp coulomb_operator, j)
+              do j = 1, size(grid%x)
 
-        ! Electron states
-        r_elec = (/ grid%x(j), grid%y(j), grid%z(j) /)
-        elec_unbound_wvfn = hydrogenic_unbound_wvfn(r_elec, transition_energy, initial_state%Z)*SphericalYCartesian(1,elec_m,r_elec)
-        elec_bound_wvfn  = hydrogenic_schro_wvfn(norm2(r_elec), elec_bound_state) * SphericalYCartesian(0, 0, r_elec)
-        initial_product_state = elec_bound_wvfn * dirac_spinor1
-        final_product_state = elec_unbound_wvfn(2) * dirac_spinor2
-        if(i == 1) then
-          elec_norm = elec_norm + conjg(elec_bound_wvfn)*elec_bound_wvfn*grid%weight(j)
-          write(81,*) norm2(r_elec), real(conjg(elec_unbound_wvfn(2))* elec_bound_wvfn)
-          write(80,*) norm2(r_elec), real(elec_unbound_wvfn(2)), real(elec_bound_wvfn)
-        end if
+                ! Electron states
+                r_elec = (/ grid%x(j), grid%y(j), grid%z(j) /)
+                elec_unbound_wvfn = hydrogenic_unbound_wvfn(r_elec, transition_energy, mu_i%Z)&
+                                    & *SphericalYCartesian(e_f%l,int(e_f%m(me)),r_elec)
+                elec_bound_wvfn=hydrogenic_schro_wvfn(norm2(r_elec), e_i) * SphericalYCartesian(e_i%l,int(e_i%m(mep)),r_elec)
+                initial_product_state = elec_bound_wvfn * dirac_spinor1
+                final_product_state = elec_unbound_wvfn(2) * dirac_spinor2
+                if(i == 1) then
+                  elec_norm = elec_norm + conjg(elec_bound_wvfn)*elec_bound_wvfn*grid%weight(j)
+                  write(81,*) norm2(r_elec), real(conjg(elec_unbound_wvfn(2))* elec_bound_wvfn)
+                  write(80,*) norm2(r_elec), real(elec_unbound_wvfn(2)), real(elec_bound_wvfn)
+                end if
 
-        ! write(*,*) r_mu, r_elec
-        coulomb_operator = coulomb_laplace_expansion(r_mu, r_elec, 1)
-        ! if(i == j) then
-          ! coulomb_operator = coulomb_laplace_expansion(r_mu, r_elec, 1)
-        ! else
-          ! coulomb_operator = 1.0_dp / norm2(r_mu - r_elec)
-        ! end if
-        integrand = integrand+coulomb_operator*dot_product(final_product_state,initial_product_state)*grid%weight(i)*grid%weight(j)&
-        &/(200**3)
+                coulomb_operator = 1.0_dp / norm2(r_mu - r_elec)
+                integrand = integrand+coulomb_operator*dot_product(final_product_state,initial_product_state)&
+                &*grid%weight(i)*grid%weight(j)/(200**3)
+              ! write(*,*) integrand
 
-      end do
-      total = total + integrand
+              end do
+            end do
+            ! write(*,*) integrand
+            tmat(1,me)%T(mi, mf) = real(conjg(integrand) * integrand)
+          end do
+        end do
+    end do
     end do
     ! end do
-    write(*,'(A, ES11.5, A, F11.3)') "Auger rate = ",real(conjg(total)*total*second)," with energy ",&
-    &transition_energy*Hartree
-      write(*,*) elec_norm
+    ! write(*,'(A, ES11.5, A, F11.3)') "Auger rate = ",real(conjg(total)*total*second)," with energy ",&
+    ! &transition_energy*Hartree
   end subroutine
 
   ! Expand out the 1/r operator using the Laplace expansion to avoid the singularity 
